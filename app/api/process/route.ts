@@ -48,22 +48,13 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // Generar Excel
-    const excelBuffer = await generateExcel(results);
-
-    // Retornar Excel
-    return new NextResponse(excelBuffer, {
-      status: 200,
-      headers: {
-        'Content-Type': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-        'Content-Disposition': `attachment; filename="Despachos_${new Date().toISOString().split('T')[0]}.xlsx"`,
-      },
-    });
-  } catch (error) {
-    console.error('Error en /api/process:', error);
-    return NextResponse.json(
-      { error: 'Error interno del servidor' },
-      { status: 500 }
-    );
+   // Retornar Excel
+   return new NextResponse(excelBuffer as any, {
+     status: 200,
+     headers: {
+       'Content-Type': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+       'Content-Disposition': `attachment; filename="Despachos_${new Date().toISOString().split('T')[0]}.xlsx"`,
+     },
+   });
   }
 }
