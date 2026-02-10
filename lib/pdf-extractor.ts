@@ -14,14 +14,38 @@ export interface DespachoData {
 
 export class PDFExtractor {
 
+  // Permite: 15059,66 | 15.059,66 | 949,00 | 1.474,500000 | 0,00
+  private static AMOUNT = `([0-9]{1,3}(?:\\.[0-9]{3})*(?:,[0-9]{1,6})|[0-9]+(?:,[0-9]{1,6})?)`;
+
   parseNumber(value: string): number {
     if (!value) return 0;
-    const cleaned = value.replace(/\./g, '').replace(',', '.');
-    return parseFloat(cleaned) || 0;
+
+    const s = value
+      .replace(/\s+/g, '')
+      .replace(/\./g, '')     // miles
+      .replace(',', '.');     // decimal
+
+    const n = Number(s);
+    return Number.isFinite(n) ? n : 0;
   }
 
   cleanFilename(filename: string): string {
     return filename.replace(/\.pdf$/i, '');
+  }
+
+  private matchAmountNear(text: string, labelRegex: RegExp): number | null {
+    // Busca: LABEL + cualquier cosa (poco) + monto
+    // [\s\S]{0,80}? permite saltos, tabs, etc.
+    const re = new RegExp(`${labelRegex.source}[\\s\\S]{0,80}?${PDFExtractor.AMOUNT}`, 'i');
+    const m = text.match(re);
+    if (!m) return null;
+    return this.parseNumber(m[1]);
+  }
+
+  private sumAll(text: string, re: RegExp): number | null {
+    const matches = Array.from(text.matchAll(re));
+    if (!matches.length) return null;
+    return matches.reduce((sum, mm) => sum + this.parseNumber(mm[1]), 0);
   }
 
   async extractFromText(text: string, filename: string): Promise<DespachoData> {
@@ -39,65 +63,60 @@ export class PDFExtractor {
       fecha_oficializacion: '',
     };
 
-    let m: RegExpMatchArray | null;
+    // 1) FOB TOTAL (más tolerante)
+    let fob =
+      this.matchAmountNear(text, /FOB\s+Total/i) ??
+      this.matchAmountNear(text, /FOB\s+Total\s+en\s+D[oó]lar/i) ??
+      this.matchAmountNear(text, /FOB\s+Total\s+en\s+Divisa/i);
 
-    // FOB TOTAL
-    // Texto real: "FOB Total\n\n34.760,81\n\nDivisa\nDOL"
-    m = text.match(/FOB\s+Total\s*\n+\s*(\d{1,3}(?:\.\d{3})*,\d{2})/);
-    if (!m) m = text.match(/FOB\s+Total\s+en\s+D[oó]lar\s*\n+\s*(\d{1,3}(?:\.\d{3})*,\d{2})/);
-    if (!m) m = text.match(/FOB\s+Total\s+en\s+Divisa\s*\n*\s*(\d{1,3}(?:\.\d{3})*,\d{2})/);
-    if (m) data.fob_total = this.parseNumber(m[1]);
-
-    // FLETE TOTAL
-    // Texto real: "Flete Total\n949,00\n\nDivisa\nDOL"
-    m = text.match(/Flete\s+Total\s*\n+\s*(\d{1,3}(?:\.\d{3})*,\d{2})/);
-    if (m) data.flete_total = this.parseNumber(m[1]);
-
-    // SEGURO TOTAL
-    // Texto real: "Seguro Total\n357,10\n\nDivisa\nDOL"
-    m = text.match(/Seguro\s+Total\s*\n+\s*(\d{1,3}(?:\.\d{3})*,\d{2})/);
-    if (m) data.seguro_total = this.parseNumber(m[1]);
-
-    // DIVISA
-    // Texto real: "Divisa\nDOL" aparece varias veces
-    m = text.match(/Divisa\s*\n\s*(DOL|USD|EUR|BRL|ARS)\b/);
-    if (m) data.divisa = m[1].toUpperCase();
-
-    // VALOR EN ADUANA EN DOLAR
-    // Texto real: "Valor en Aduana en Dólar\n\n36.066,91"
-    const valRegex = /Valor\s+en\s+Aduana\s+en\s+D[oó]lar\s*\n+\s*(\d{1,3}(?:\.\d{3})*,\d{2})/g;
-    const valMatches = Array.from(text.matchAll(valRegex));
-    if (valMatches.length > 0) {
-      data.valor_aduana_dolar = valMatches.reduce((sum, match) => sum + this.parseNumber(match[1]), 0);
+    // Fallback: si no aparece FOB Total, sumá "Monto FOB:" (subítems)
+    if (fob === null) {
+      const reMontoFob = new RegExp(`Monto\\s+FOB:\\s*${PDFExtractor.AMOUNT}`, 'gi');
+      fob = this.sumAll(text, reMontoFob);
     }
+    if (fob !== null) data.fob_total = fob;
 
-    // COTIZACION
-    // Texto real: "Cotiz = 1.474,500000"
-    m = text.match(/Cotiz\s*=\s*(\d{1,3}(?:\.\d{3})*,\d+)/);
-    if (m) data.cotizacion = this.parseNumber(m[1]);
+    // 2) FLETE TOTAL (tolerante)
+    const flete = this.matchAmountNear(text, /Flete\s+Total/i);
+    if (flete !== null) data.flete_total = flete;
 
-    // VENDEDOR
-    // Texto real: "Vendedor\n\n30-58346901-6\n\nINDUSTRIES PPD INC. DIV MEDITECH"
-    // El CUIT (30-XXXXXXXX-X) aparece entre "Vendedor" y el nombre real
-    m = text.match(/Vendedor\s*\n+\s*\d{2}-\d{8}-\d\s*\n+\s*([A-Z][^\n]{3,80})/);
-    if (!m) m = text.match(/Vendedor\s*\n+\s*([A-Z][^\n]{3,80})/);
-    if (m) data.vendedor = m[1].replace(/\s+/g, ' ').trim();
+    // 3) SEGURO TOTAL (tolerante)
+    const seguro = this.matchAmountNear(text, /Seguro\s+Total/i);
+    if (seguro !== null) data.seguro_total = seguro;
 
-    // IMPORTADOR / EXPORTADOR
-    // Texto real: "Importador / Exportador\nIMPLANTES F. I. C. O.  ALEMANA    (IVA INS: SI)\n\nCUIT Nº"
-    m = text.match(/Importador\s*\/\s*Exportador\s*\n\s*([^\n]{3,100})/);
-    if (m) data.importador = m[1].replace(/\s+/g, ' ').trim();
+    // 4) DIVISA (a veces viene "DOL", a veces "USD")
+    const mDiv = text.match(/Divisa\s*[\r\n\s]+(DOL|USD|EUR|BRL|ARS)\b/i);
+    if (mDiv) data.divisa = mDiv[1].toUpperCase();
 
-    // NUMERO DE DESPACHO
-    // Texto real: "25   073   IC04   105340   Z"
-    m = text.match(/(\d{2}\s+\d{3}\s+[A-Z0-9]{2,6}\s+\d{4,8}\s+[A-Z])\b/);
-    if (m) data.despacho_numero = m[1].replace(/\s+/g, ' ').trim();
+    // 5) VALOR EN ADUANA EN DOLAR (sumatoria si aparece varias veces)
+    const reValAduana = new RegExp(
+      `Valor\\s+en\\s+Aduana\\s+en\\s+D[oó]lar[\\s\\S]{0,80}?${PDFExtractor.AMOUNT}`,
+      'gi'
+    );
+    const val = this.sumAll(text, reValAduana);
+    if (val !== null) data.valor_aduana_dolar = val;
 
-    // FECHA DE OFICIALIZACION
-    // Texto real: "Oficialización\n\n18/09/2025"
-    m = text.match(/Oficializaci[oó]n\s*\n+\s*(\d{2}\/\d{2}\/\d{4})/);
-    if (!m) m = text.match(/Oficializaci[oó]n\s+(\d{2}\/\d{2}\/\d{4})/);
-    if (m) data.fecha_oficializacion = m[1];
+    // 6) COTIZACION (decimales variables)
+    const mCot = text.match(new RegExp(`Cotiz\\s*=\\s*${PDFExtractor.AMOUNT}`, 'i'));
+    if (mCot) data.cotizacion = this.parseNumber(mCot[1]);
+
+    // 7) VENDEDOR (dejalo como está, pero tolerando saltos)
+    let mVend = text.match(/Vendedor[\r\n\s]+\d{2}-\d{8}-\d[\r\n\s]+([A-Z][^\n]{3,80})/i);
+    if (!mVend) mVend = text.match(/Vendedor[\r\n\s]+([A-Z][^\n]{3,80})/i);
+    if (mVend) data.vendedor = mVend[1].replace(/\s+/g, ' ').trim();
+
+    // 8) IMPORTADOR
+    const mImp = text.match(/Importador\s*\/\s*Exportador[\r\n\s]+([^\n]{3,100})/i);
+    if (mImp) data.importador = mImp[1].replace(/\s+/g, ' ').trim();
+
+    // 9) NUMERO DE DESPACHO
+    const mDesp = text.match(/(\d{2}\s+\d{3}\s+[A-Z0-9]{2,6}\s+\d{4,8}\s+[A-Z])\b/);
+    if (mDesp) data.despacho_numero = mDesp[1].replace(/\s+/g, ' ').trim();
+
+    // 10) FECHA
+    let mFecha = text.match(/Oficializaci[oó]n[\r\n\s]+(\d{2}\/\d{2}\/\d{4})/i);
+    if (!mFecha) mFecha = text.match(/Oficializaci[oó]n\s+(\d{2}\/\d{2}\/\d{4})/i);
+    if (mFecha) data.fecha_oficializacion = mFecha[1];
 
     return data;
   }
