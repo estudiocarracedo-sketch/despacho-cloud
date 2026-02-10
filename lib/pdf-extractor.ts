@@ -14,69 +14,39 @@ export interface DespachoData {
 }
 
 export class PDFExtractor {
-  private patterns = {
-    // Mejorados para ser más flexibles
-    fob_total: /FOB\s+Total[^\d]*?(\d{1,3}(?:[.,]\d{3})*[.,]\d{2})/i,
-    flete_total: /Flete\s+Total[^\d]*?(\d{1,3}(?:[.,]\d{3})*[.,]\d{2})/i,
-    seguro_total: /Seguro\s+Total[^\d]*?(\d{1,3}(?:[.,]\d{3})*[.,]\d{2})/i,
-    
-    // Mejorado para capturar divisa
-    divisa: /(?:FOB|Flete|Seguro)\s+Total[^\n]*?(DOL|USD|EUR|BRL|ARS)/i,
-    
-    // Mejorado para valor en aduana
-    valor_aduana: /Valor\s+en\s+Aduana\s+en\s+(?:Divisa|D[oó]lar)[^\d]*?(\d{1,3}(?:[.,]\d{3})*[.,]\d{2})/gi,
-    
-    // Mejorado para cotización
-    cotizacion: /Cotiz\s*[=:]\s*(\d{1,3}(?:[.,]\d{3})*[.,]\d+)/i,
-    
-    // Mejorado para vendedor
-    vendedor: /Vendedor[^\n]*?\n\s*([A-Z][A-Z0-9\s.,\-&()]+?)(?=\n|\s+V[ií]a|\s+Document)/i,
-    
-    // Mejorado para importador - ahora busca específicamente después de "Importador"
-    importador: /Importador\s*[\/]?\s*Exportador[^\n]*?\n\s*([A-Z][A-Z0-9\s.,\-&()]+?)(?=\s+(?:CUIT|Agente|Despachante)|\n\s*CUIT|\n\s*\d)/i,
-    
-    // Mejorado para número de despacho
-    despacho_num: /(?:A[ñn]o\s*[\/]?\s*Ad\.?\s*[\/]?\s*Tipo\s*[\/]?\s*N[º°]Reg\.?\s*[\/]?\s*DC[^\n]*?)?(\d{2}\s+\d{3}\s+[A-Z]{2,4}\s+\d+\s+[A-Z])/i,
-    
-    // Mejorado para fecha de oficialización
-    oficializacion: /Oficializaci[oó]n[^\d]*?(\d{2}[\/\-]\d{2}[\/\-]\d{4})/i,
-  };
 
   parseNumber(value: string): number {
     if (!value) return 0;
+    // Formato argentino: 1.474,50 → quitar puntos de miles, reemplazar coma decimal
     const cleaned = value.replace(/\./g, '').replace(',', '.');
     return parseFloat(cleaned) || 0;
   }
 
-  extractValorAduanaTotal(text: string): number {
-    const matches = Array.from(text.matchAll(this.patterns.valor_aduana));
-    if (!matches || matches.length === 0) return 0;
-    
-    const total = matches.reduce((sum, match) => {
-      const numStr = match[1];
-      return sum + (numStr ? this.parseNumber(numStr) : 0);
-    }, 0);
-    
-    return total;
-  }
-
   cleanFilename(filename: string): string {
-    // Quitar la extensión .pdf
     return filename.replace(/\.pdf$/i, '');
   }
 
-  cleanText(text: string): string {
-    // Limpiar texto: quitar espacios extra, saltos de línea múltiples
-    return text
-      .replace(/\s+/g, ' ')
-      .replace(/\n\s*\n/g, '\n')
-      .trim();
+  extractValorAduanaTotal(text: string): number {
+    // Buscar todas las ocurrencias de "Valor en Aduana en Dólar" y sumarlas
+    const regex = /Valor\s+en\s+Aduana\s+en\s+D[oó]lar[\s\S]{1,50}?(\d{1,3}(?:\.\d{3})*,\d{2})/gi;
+    const matches = Array.from(text.matchAll(regex));
+
+    if (matches.length > 0) {
+      return matches.reduce((sum, m) => sum + this.parseNumber(m[1]), 0);
+    }
+
+    // Fallback: buscar en "Divisa"
+    const regex2 = /Valor\s+en\s+Aduana\s+en\s+Divisa[\s\S]{1,50}?(\d{1,3}(?:\.\d{3})*,\d{2})/gi;
+    const matches2 = Array.from(text.matchAll(regex2));
+    if (matches2.length > 0) {
+      return matches2.reduce((sum, m) => sum + this.parseNumber(m[1]), 0);
+    }
+
+    return 0;
   }
 
   async extractFromText(text: string, filename: string): Promise<DespachoData> {
-    // Limpiar el texto primero
-    const cleanedText = this.cleanText(text);
-    
+
     const data: DespachoData = {
       archivo: this.cleanFilename(filename),
       fob_total: 0,
@@ -91,62 +61,75 @@ export class PDFExtractor {
       fecha_oficializacion: '',
     };
 
-    // Extraer FOB
-    const fobMatch = cleanedText.match(this.patterns.fob_total);
-    if (fobMatch) {
-      data.fob_total = this.parseNumber(fobMatch[1]);
-    }
+    // ── FOB TOTAL ──────────────────────────────────────────────────────────────
+    // En el PDF texto extraido: "FOB Total en Divisa 34.760,81 FOB Total en Dólar 34.760,81"
+    // O en la cabecera: "FOB 34.760,81 DOL 949,00 DOL"
+    let m: RegExpMatchArray | null;
 
-    // Extraer Flete
-    const fleteMatch = cleanedText.match(this.patterns.flete_total);
-    if (fleteMatch) {
-      data.flete_total = this.parseNumber(fleteMatch[1]);
-    }
+    m = text.match(/FOB\s+Total\s+en\s+D[oó]lar[\s\S]{1,20}?(\d{1,3}(?:\.\d{3})*,\d{2})/i);
+    if (!m) m = text.match(/FOB\s+Total\s+en\s+Divisa[\s\S]{1,20}?(\d{1,3}(?:\.\d{3})*,\d{2})/i);
+    if (!m) m = text.match(/FOB\s+(\d{1,3}(?:\.\d{3})*,\d{2})\s+DOL/i);
+    if (!m) m = text.match(/Cond\.\s*Venta\s+FOB[\s\S]{1,30}?(\d{1,3}(?:\.\d{3})*,\d{2})/i);
+    if (m) data.fob_total = this.parseNumber(m[1]);
 
-    // Extraer Seguro
-    const seguroMatch = cleanedText.match(this.patterns.seguro_total);
-    if (seguroMatch) {
-      data.seguro_total = this.parseNumber(seguroMatch[1]);
-    }
+    // ── FLETE TOTAL ────────────────────────────────────────────────────────────
+    // En el PDF: "949,00 DOL" después de "Flete Total Divisa"
+    m = text.match(/Flete\s+Total[\s\S]{1,5}?(?:Divisa|DOL|USD)[\s\S]{1,30}?(\d{1,3}(?:\.\d{3})*,\d{2})/i);
+    if (!m) m = text.match(/Flete\s+Total[\s\S]{1,30}?(\d{1,3}(?:\.\d{3})*,\d{2})\s+(?:DOL|USD)/i);
+    if (!m) m = text.match(/(\d{1,3}(?:\.\d{3})*,\d{2})\s+DOL[\s\S]{1,10}?(\d{1,3}(?:\.\d{3})*,\d{2})\s+DOL/i);
+    if (m && m[2]) data.flete_total = this.parseNumber(m[2]);
+    else if (m && m[1] && !m[2]) data.flete_total = this.parseNumber(m[1]);
 
-    // Extraer Divisa
-    const divisaMatch = cleanedText.match(this.patterns.divisa);
-    if (divisaMatch) {
-      data.divisa = divisaMatch[1].toUpperCase();
-    }
+    // ── SEGURO TOTAL ───────────────────────────────────────────────────────────
+    // En el PDF: "Seguro Total ... 357,10 DOL"
+    m = text.match(/Seguro\s+Total[\s\S]{1,30}?(\d{1,3}(?:\.\d{3})*,\d{2})\s+(?:DOL|USD)/i);
+    if (!m) m = text.match(/Seguro\s+Total[\s\S]{1,20}?(\d{1,3}(?:\.\d{3})*,\d{2})/i);
+    if (m) data.seguro_total = this.parseNumber(m[1]);
 
-    // Valor aduana con suma de múltiples páginas
+    // ── DIVISA ─────────────────────────────────────────────────────────────────
+    // En el PDF aparece DOL junto a los montos
+    m = text.match(/\d{1,3}(?:\.\d{3})*,\d{2}\s+(DOL|USD|EUR|BRL|ARS)\b/i);
+    if (m) data.divisa = m[1].toUpperCase();
+
+    // ── VALOR EN ADUANA ────────────────────────────────────────────────────────
     data.valor_aduana_dolar = this.extractValorAduanaTotal(text);
 
-    // Extraer Cotización
-    const cotizMatch = cleanedText.match(this.patterns.cotizacion);
-    if (cotizMatch) {
-      data.cotizacion = this.parseNumber(cotizMatch[1]);
-    }
+    // ── COTIZACIÓN ─────────────────────────────────────────────────────────────
+    // En el PDF: "Cotiz = 1.474,500000"
+    m = text.match(/Cotiz\s*=\s*(\d{1,3}(?:\.\d{3})*,\d+)/i);
+    if (!m) m = text.match(/Cotiz\s*=\s*(\d[\d.,]+)/i);
+    if (m) data.cotizacion = this.parseNumber(m[1]);
 
-    // Extraer Vendedor
-    const vendedorMatch = text.match(this.patterns.vendedor);
-    if (vendedorMatch) {
-      data.vendedor = vendedorMatch[1].trim().substring(0, 100); // Limitar a 100 caracteres
-    }
+    // ── VENDEDOR ───────────────────────────────────────────────────────────────
+    // En el PDF: "Vendedor\nINDUSTRIES PPD INC. DIV MEDITECH"
+    // pdf-parse puede extraerlo como "Vendedor INDUSTRIES PPD INC. DIV MEDITECH Vía"
+    m = text.match(/Vendedor\s*\n([^\n]{3,80})/i);
+    if (!m) m = text.match(/Vendedor\s+([A-Z][A-Z0-9\s.,\-&()\/]{3,80}?)(?:\s+V[ií]a|\s+Vía|\s+CUIT|\n)/i);
+    if (m) data.vendedor = m[1].replace(/\s+/g, ' ').trim();
 
-    // Extraer Importador
-    const importadorMatch = text.match(this.patterns.importador);
-    if (importadorMatch) {
-      data.importador = importadorMatch[1].trim().substring(0, 100);
-    }
+    // ── IMPORTADOR / EXPORTADOR ────────────────────────────────────────────────
+    // En el PDF: "Importador / Exportador\nIMPLANTES F. I. C. O. ALEMANA (IVA INS: SI)"
+    // pdf-parse puede extraerlo todo en una línea
+    m = text.match(/Importador\s*\/\s*Exportador\s*\n([^\n]{3,100})/i);
+    if (!m) m = text.match(/Importador\s*\/?\s*Exportador\s+([A-Z][A-Z0-9\s.,\-&()\/:]+?)(?=\s*CUIT\s*N[º°]|\s*Agente|\s*\n\s*CUIT)/i);
+    if (!m) m = text.match(/Importador[^/\n]+\/[^/\n]+Exportador\s+([A-Z][^\n]{3,100}?)(?=\s*CUIT|\n)/i);
+    if (m) data.importador = m[1].replace(/\s+/g, ' ').trim().substring(0, 100);
 
-    // Extraer Número de Despacho
-    const despachoMatch = text.match(this.patterns.despacho_num);
-    if (despachoMatch) {
-      data.despacho_numero = despachoMatch[1].trim();
-    }
+    // ── NÚMERO DE DESPACHO ─────────────────────────────────────────────────────
+    // En el PDF: "25 073 IC04 105340 Z"
+    // Formato exacto: DD EEE LLLL NNNNNN L
+    // Donde D=dígito, E=dígito, L=letra/dígito, N=dígito, L=letra final
+    m = text.match(/\b(\d{2}\s+\d{3}\s+[A-Z]{2}\d{2}\s+\d{6}\s+[A-Z])\b/i);
+    if (!m) m = text.match(/\b(\d{2}\s+\d{3}\s+[A-Z0-9]{4}\s+\d{6}\s+[A-Z])\b/i);
+    if (!m) m = text.match(/A[ñn]o\s*\/\s*Ad\.?[\s\S]{1,60}?(\d{2}\s+\d{3}\s+[A-Z0-9]{4}\s+\d{5,7}\s+[A-Z])/i);
+    if (m) data.despacho_numero = m[1].replace(/\s+/g, ' ').trim();
 
-    // Extraer Fecha de Oficialización
-    const fechaMatch = text.match(this.patterns.oficializacion);
-    if (fechaMatch) {
-      data.fecha_oficializacion = fechaMatch[1];
-    }
+    // ── FECHA DE OFICIALIZACIÓN ────────────────────────────────────────────────
+    // En el PDF: "Oficialización\n18/09/2025" o "Oficialización 18/09/2025"
+    m = text.match(/Oficializaci[oó]n\s+(\d{2}\/\d{2}\/\d{4})/i);
+    if (!m) m = text.match(/Oficializaci[oó]n[\s\S]{1,15}?(\d{2}\s*\/\s*\d{2}\s*\/\s*\d{4})/i);
+    if (!m) m = text.match(/Oficializaci[oó]n[\s\S]{1,5}?\n(\d{2}\/\d{2}\/\d{4})/i);
+    if (m) data.fecha_oficializacion = m[1].replace(/\s/g, '');
 
     return data;
   }
