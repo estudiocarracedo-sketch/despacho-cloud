@@ -1,4 +1,3 @@
-// lib/excel-generator.ts
 import ExcelJS from 'exceljs';
 import { DespachoData } from './pdf-extractor';
 
@@ -6,7 +5,6 @@ export async function generateExcel(data: DespachoData[]): Promise<Buffer> {
   const workbook = new ExcelJS.Workbook();
   const worksheet = workbook.addWorksheet('Despachos');
 
-  // Definir columnas
   worksheet.columns = [
     { header: 'Archivo', key: 'archivo', width: 25 },
     { header: 'Despacho Nº', key: 'despacho_numero', width: 25 },
@@ -21,7 +19,6 @@ export async function generateExcel(data: DespachoData[]): Promise<Buffer> {
     { header: 'Cotización', key: 'cotizacion', width: 15 },
   ];
 
-  // Estilo del header
   const headerRow = worksheet.getRow(1);
   headerRow.font = { bold: true, color: { argb: 'FFFFFFFF' }, size: 11 };
   headerRow.fill = {
@@ -32,18 +29,13 @@ export async function generateExcel(data: DespachoData[]): Promise<Buffer> {
   headerRow.alignment = { vertical: 'middle', horizontal: 'center', wrapText: true };
   headerRow.height = 30;
 
-  // Agregar datos
   data.forEach((item) => {
     const row = worksheet.addRow(item);
-    
-    // Formato de números
     row.getCell('fob_total').numFmt = '#,##0.00';
     row.getCell('flete_total').numFmt = '#,##0.00';
     row.getCell('seguro_total').numFmt = '#,##0.00';
     row.getCell('valor_aduana_dolar').numFmt = '#,##0.00';
     row.getCell('cotizacion').numFmt = '#,##0.0000';
-
-    // Bordes
     row.eachCell((cell) => {
       cell.border = {
         top: { style: 'thin' },
@@ -54,10 +46,8 @@ export async function generateExcel(data: DespachoData[]): Promise<Buffer> {
     });
   });
 
-  // Congelar primera fila
   worksheet.views = [{ state: 'frozen', ySplit: 1 }];
 
-  // Generar buffer
   const buffer = await workbook.xlsx.writeBuffer();
   return Buffer.from(buffer);
 }
